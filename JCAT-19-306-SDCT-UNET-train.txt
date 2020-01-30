@@ -1,0 +1,220 @@
+import os
+import random
+import matplotlib.pyplot as plt
+import pylab
+import numpy as np
+import pickle
+
+import keras
+from keras.models import Model
+from keras import models
+from keras.layers import *
+from keras.optimizers import Adam
+from keras.optimizers import RMSprop
+from keras.optimizers import SGD
+from keras.regularizers import l2
+from keras.preprocessing.image import ImageDataGenerator
+import keras.backend as K
+from keras.callbacks import TensorBoard
+from keras.callbacks import LearningRateScheduler, ModelCheckpoint
+import tensorflow as tf
+
+SEED = 243
+random.seed(SEED)
+
+comptonDir = 'pyOsiriXimageExports/compton'
+peDir = 'pyOsiriXimageExports/pe'
+maskDir = 'pyOsiriXimageExports/mask'
+
+# Creating crossvalidation sets. Only run once for the project.
+ptList = ["001", "120", "151", "216", "237", "249",
+          "261", "361", "414", "428", "434", "445", 
+          "007", "540", "611", "625", "681", "687", 
+          "709", "729", "737", "751", "754", "814", 
+          "873", "904", "935", "938", "942", "954"]
+
+random.shuffle(ptList)
+
+numPerCV = int(len(ptList)/5)
+
+list_CV1 = ptList[:numPerCV*1]
+list_CV2 = ptList[numPerCV*1:numPerCV*2]
+list_CV3 = ptList[numPerCV*2:numPerCV*3]
+list_CV4 = ptList[numPerCV*3:numPerCV*4]
+list_CV5 = ptList[numPerCV*4:]
+
+cvDict = {'cv1':list_CV1,
+         'cv2':list_CV2,
+         'cv3':list_CV3,
+         'cv4':list_CV4,
+         'cv5':list_CV5}
+
+pickle.dump(cvDict, open("cvDict.p","wb"))
+
+# cvDict contains predivided crossvalidation sets
+pickle.load(open("cvDict.p","rb"))
+cvDict = pickle.load(open("cvDict.p","rb"))
+
+trainList = []
+trainList.extend(cvDict['cv1'])
+trainList.extend(cvDict['cv2'])
+trainList.extend(cvDict['cv3'])
+trainList.extend(cvDict['cv4'])
+testList = cvDict['cv5']
+
+# Preparing training dataset
+
+train_images = [x[:-4] for x in sorted(os.listdir(comptonDir)) if x[-4:]=='.npy' and x[:3] in trainList]
+test_images = [x[:-4] for x in sorted(os.listdir(comptonDir)) if x[-4:]=='.npy' and x[:3] in testList]
+
+random.shuffle(train_images)
+random.shuffle(test_images)
+
+sampleImagePath = comptonDir + '/' + train_images[0] + '.npy'
+sampleImage = np.load(sampleImagePath)
+imageWidth, imageHeight = sampleImage.shape
+SEED = 42
+
+x_data = []
+y_data = []
+
+for i, name in enumerate(train_images):
+    maskPath = maskDir + '/' + name + '.npy'
+    mask = np.load(maskPath)
+    if np.sum(mask)>0:
+        mask = mask[:,:,np.newaxis]
+        y_data.append(mask)
+        comptonPath = comptonDir + '/' + name + '.npy'
+        compton = np.load(comptonPath)
+        pePath = peDir + '/' + name + '.npy'
+        pe = np.load(pePath)
+        image = np.stack((compton,pe))
+        image = np.moveaxis(image, 0, -1)
+        x_data.append(image)
+        
+x_data = np.array(x_data)
+y_data = np.array(y_data)
+
+saveImagePath = 'excldCV5-data/MADplot_xTrain_All_images.npy'
+saveMaskPath = 'excldCV5-data/MADplot_yTrain_All_images.npy'
+np.save(saveImagePath, x_data)
+np.save(saveMaskPath, y_data)
+
+imageWidth, imageHeight = sampleImage.shape
+
+x_val = []
+y_val = []
+
+for i, name in enumerate(test_images):
+    maskPath = maskDir + '/' + name + '.npy'
+    mask = np.load(maskPath)
+    if np.sum(mask)>0:
+        mask = mask[:,:,np.newaxis]
+        y_val.append(mask)
+        comptonPath = comptonDir + '/' + name + '.npy'
+        compton = np.load(comptonPath)
+        pePath = peDir + '/' + name + '.npy'
+        pe = np.load(pePath)
+        image = np.stack((compton,pe))
+        image = np.moveaxis(image, 0, -1)
+        x_val.append(image)
+        
+x_val = np.array(x_val)
+y_val = np.array(y_val)
+
+save_val_imagePath = 'excldCV5-data/MADplot_xVal_All_images.npy'
+save_val_maskPath = 'excldCV5-data/MADplot_yVal_All_images.npy'
+np.save(save_val_imagePath, x_val)
+np.save(save_val_maskPath, y_val)
+
+# Training
+def my_generator(x_data, y_data, batch_size):
+    data_generator = ImageDataGenerator(
+            width_shift_range=0.1,
+            height_shift_range=0.1,
+            rotation_range=10,
+            zoom_range=0.1).flow(x_data, x_data, batch_size, seed=SEED)
+    mask_generator = ImageDataGenerator(
+            width_shift_range=0.1,
+            height_shift_range=0.1,
+            rotation_range=10,
+            zoom_range=0.1).flow(y_data, y_data, batch_size, seed=SEED)
+    while True:
+        x_batch, _ = data_generator.next()
+        y_batch, _ = mask_generator.next()
+        yield x_batch, y_batch
+
+train_gen = my_generator(x_train, y_train, 4)
+
+val_gen = ImageDataGenerator().flow(x_val, y_val, batch_size=4, seed=SEED)
+
+# UNET architecture
+def unet(pretrained_weights = None,input_size = (512,512,2)):
+    
+    initializerString = 'TruncatedNormal'
+    
+    inputs = Input(input_size)
+    norm1 = BatchNormalization(axis=-1)(inputs)
+    
+    conv1 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(norm1)
+    conv1 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(conv1)
+    pool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
+    conv2 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(pool1)
+    conv2 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(conv2)
+    pool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
+    conv3 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(pool2)
+    conv3 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(conv3)
+    pool3 = MaxPooling2D(pool_size=(2, 2))(conv3)
+    conv4 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(pool3)
+    conv4 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(conv4)
+    drop4 = Dropout(0.3)(conv4)
+    pool4 = MaxPooling2D(pool_size=(2, 2))(drop4)
+
+    conv5 = Conv2D(1024, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(pool4)
+    conv5 = Conv2D(1024, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(conv5)
+    drop5 = Dropout(0.3)(conv5)
+
+    up6 = Conv2D(512, 2, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(UpSampling2D(size = (2,2))(drop5))
+    merge6 = concatenate([drop4,up6], axis = -1)
+    conv6 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(merge6)
+    conv6 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(conv6)
+
+    up7 = Conv2D(256, 2, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(UpSampling2D(size = (2,2))(conv6))
+    merge7 = concatenate([conv3,up7], axis = -1)
+    conv7 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(merge7)
+    conv7 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(conv7)
+
+    up8 = Conv2D(128, 2, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(UpSampling2D(size = (2,2))(conv7))
+    merge8 = concatenate([conv2,up8], axis = -1)
+    conv8 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(merge8)
+    conv8 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(conv8)
+
+    up9 = Conv2D(64, 2, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(UpSampling2D(size = (2,2))(conv8))
+    merge9 = concatenate([conv1,up9], axis = -1)
+    conv9 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(merge9)
+    conv9 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(conv9)
+    conv9 = Conv2D(2, 3, activation = 'relu', padding = 'same', kernel_initializer = initializerString)(conv9)
+    conv10 = Conv2D(1, 1, activation = 'sigmoid')(conv9)
+    
+    model = Model(inputs = inputs, outputs = conv10)
+
+    if(pretrained_weights):
+    	model.load_weights(pretrained_weights)
+
+    return model
+
+model = unet(input_size = image_batch[1].shape)
+
+model.compile(optimizer = Adam(lr=5e-7), loss = 'binary_crossentropy', metrics = ['binary_accuracy'])
+
+class_weights = [0.022, 0.978]
+
+hist = model.fit_generator(train_gen,
+                           steps_per_epoch = 106*2,
+                           validation_data = val_gen,
+                           epochs=800,
+                          callbacks = [],
+                          validation_steps = int(198/2),
+                          class_weight=class_weights)
+
+model.save('excldCV5-data/'+datestring+'_excldCV5-MADplot-800Epochs.h')

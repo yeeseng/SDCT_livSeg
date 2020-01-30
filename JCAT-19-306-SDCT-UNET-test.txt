@@ -1,0 +1,85 @@
+import os
+import random
+import matplotlib.pyplot as plt
+import pylab
+import numpy as np
+
+import keras
+from keras.models import Model
+from keras import models
+from keras.layers import *
+from keras.optimizers import Adam
+from keras.optimizers import RMSprop
+from keras.optimizers import SGD
+from keras.regularizers import l2
+from keras.preprocessing.image import ImageDataGenerator
+import keras.backend as K
+from keras.callbacks import TensorBoard
+from keras.callbacks import LearningRateScheduler, ModelCheckpoint
+SEED = 145
+
+import pickle
+
+cvDict = pickle.load(open("excldCV5-data/cvDict.p","rb"))
+
+listOfPtIds = cvDict['cv5']
+
+listOfAllImages = os.listdir('pyOsiriXimageExports/compton')
+
+model = models.load_model('190204_excldCV5-MADplot-800Epochs.h')
+
+comptonDir = 'pyOsiriXimageExports/compton'
+peDir = 'pyOsiriXimageExports/pe'
+maskDir = 'pyOsiriXimageExports/mask'
+
+listOfDSCs = []
+
+for eachPt in listOfPtIds:
+    thisPtImages = []
+    for eachImage in listOfAllImages:
+        if eachImage[:3] == eachPt:
+            thisPtImages.append(eachImage)
+
+    print(len(thisPtImages))
+
+    sumMaskPixels = 0.0
+    sumPredictedMaskPixels = 0.0
+    sumOverlap = 0.0
+
+    for eachImage in thisPtImages:
+
+        maskPath = maskDir + '/' + eachImage
+        mask = np.load(maskPath)
+
+        comptonPath = comptonDir + '/' + eachImage
+        compton = np.load(comptonPath)
+
+        pePath = peDir + '/' + eachImage
+        pe = np.load(pePath)
+        image = np.stack((compton,pe))
+        image = np.moveaxis(image, 0, -1)
+
+        image = image[np.newaxis,:,:,:]
+        yhat = model.predict(image)
+
+        predictedMask = yhat[0,:,:,0]>0.5
+
+        overlap = np.logical_and(mask, predictedMask)
+        sumOverlap = sumOverlap+np.sum(overlap)
+        sumMaskPixels = sumMaskPixels + np.sum(mask)
+        sumPredictedMaskPixels = sumPredictedMaskPixels + np.sum(predictedMask)
+
+    print(sumOverlap)
+    print(sumMaskPixels)
+    print(sumPredictedMaskPixels)
+
+    DSC = float(2*sumOverlap)/float(sumMaskPixels+sumPredictedMaskPixels)
+    listOfDSCs.append(DSC)
+
+print(listOfDSCs)
+
+sum = 0
+for eachItem in listOfDSCs:
+    sum+=eachItem
+
+print(sum/6.0)

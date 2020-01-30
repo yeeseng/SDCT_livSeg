@@ -1,0 +1,135 @@
+#HeaderInfo
+#type=ROITool
+#name=JUST LIVER
+#version=0.0.1
+#author=xxx
+#EndHeaderInfo
+
+#This script is written in python for use with pyOsirix, a python interpretor plugin for OsiriX
+
+#import the required libraries
+import osirix
+import numpy as np
+import scipy
+from scipy.ndimage.morphology import binary_dilation,binary_erosion,binary_closing
+from scipy.ndimage import generate_binary_structure
+from skimage.morphology import label,remove_small_objects,remove_small_holes
+from sklearn.mixture import GaussianMixture
+from scipy import ndimage
+import time
+from scipy.sparse import coo_matrix
+from skimage.feature import peak_local_max
+
+now=time.time()
+
+vc = osirix.getDisplayed2DViewers()
+
+for i in range(len(vc)):
+    if vc[i].title.find('971')>0:
+        Combined_series = i
+    if vc[i].title.find('972')>0: 
+        Compton_series = i
+    if vc[i].title.find('973')>0:
+        PE_series = i
+    if vc[i].title.find('975')>0:        
+        MAD_local_series = i
+    if vc[i].title.find('976')>0:
+            MAD_global_series = i
+
+Combined_pixList = vc[Combined_series].pixList(vc[Combined_series].movieIdx)
+Combined_pix = Combined_pixList[ vc[Combined_series].idx ]
+
+Compton_pixList = vc[Compton_series].pixList(vc[Compton_series].movieIdx)
+PE_pixList = vc[PE_series].pixList(vc[PE_series].movieIdx)
+
+num_Images = len(Compton_pixList)
+
+img3d=np.zeros([3,num_Images,Combined_pix.shape[0],Combined_pix.shape[1]],dtype=float)
+
+wait = vc[Combined_series].startWaitProgressWindow('Calculating data', num_Images)
+for ind in range(0, num_Images):
+    img3d[0,ind,:,:] = Combined_pixList[ind].image
+    img3d[1,ind,:,:] = Compton_pixList[ind].image
+    img3d[2,ind,:,:] = PE_pixList[ind].image
+    wait.incrementBy(1.0)
+print(img3d.shape)
+vc[Combined_series].endWaitWindow(wait)
+livermask=img3d[0,:,:,:]>-50
+livermask=np.logical_and(livermask,img3d[0,:,:,:]<200)
+img3d=img3d.reshape(3,-1).T
+print(img3d.shape)
+print(livermask.shape)
+img3d=img3d[livermask.flatten().astype(bool)]
+
+rdn=50000
+idx=np.floor(np.random.rand(rdn)*img3d.shape[0]).astype('int')
+img3d_rdn=img3d[idx]
+
+mad=coo_matrix((np.ones(img3d.shape[0]),(img3d[:,1].astype(int),img3d[:,2].astype(int)))).toarray()
+
+n_peaks=9
+means_=peak_local_max(mad,min_distance=5,footprint=np.ones((3,3)),num_peaks=n_peaks)
+
+n_labels=n_peaks
+
+gmm = GaussianMixture(n_components=n_labels,means_init=means_)
+gmm.fit(img3d_rdn[:,1:3])
+print(gmm.means_)
+print(gmm.covariances_)
+
+del(img3d_rdn)
+
+label1=gmm.predict(img3d[:,1:3])+1
+
+coo=np.indices((num_Images,Combined_pix.shape[0],Combined_pix.shape[1])).reshape(3,-1).T
+coo=coo[livermask.flatten().astype(bool),:]
+
+
+medians=np.zeros(n_peaks)
+for i in range(1,n_peaks+1):
+	medians[i-1]=-np.median(coo[label1==i,1])
+
+liver_label=np.argmax(medians)+1
+cluster=np.zeros(livermask.shape)
+cluster[np.where(livermask)]=label1
+liver=cluster==liver_label
+
+
+ball=np.zeros((3,5,5))
+ball[1,:,:]=np.array(((0,0,1,0,0),(0,1,1,1,0),(1,1,1,1,1),(0,1,1,1,0),(0,0,1,0,0)))
+ball[0,:,:]=np.array(((0,0,0,0,0),(0,0,1,0,0),(0,1,1,1,0),(0,0,1,0,0),(0,0,0,0,0)))
+ball[2,:,:]=ball[1,:,:]
+
+for i in range(0,num_Images):
+	liver[i,:,:]=remove_small_holes(liver[i,:,:],9999)
+liver=binary_closing(liver,ball)
+liver1=liver
+
+
+liver=binary_erosion(liver,ball)
+liver=remove_small_objects(liver,min_size=5000,connectivity=2)
+
+labels,num=label(liver,return_num=1)
+counts=np.unique(labels,return_counts=1)
+print(counts)
+print(counts[0].shape)
+
+if counts[0].shape[0]>1:
+	counts=counts[1]
+	counts=counts[1:counts.shape[0]]
+	liver=labels==np.argmax(counts)+1
+liver=binary_dilation(liver,ball)
+liver=binary_closing(liver,ball,iterations=10)
+liver[livermask==False]=False
+
+wait = vc[Combined_series].startWaitProgressWindow('Apply ROIs to Volume', num_Images)
+for ind in range(0, num_Images):
+	Combined_pix=Combined_pixList[ind]
+	roiLiver=osirix.ROI(itype='tPlain',buffer=liver[ind,:,:],name='Liver',DCMPix=Combined_pix)
+	roiLiver.color=(255,255,0)
+	vc[Combined_series].setROI(roiLiver,position=ind)
+	vc[Combined_series].needsDisplayUpdate()
+	wait.incrementBy(1.0)
+vc[Combined_series].endWaitWindow(wait)
+
+print(time.time()-now)
